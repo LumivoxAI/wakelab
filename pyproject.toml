@@ -1,0 +1,87 @@
+[project]
+name = "lumivox-wakelab"
+version = "0.1.0"
+description = "Synchronous voice-activity and wake-word detection for 16 kHz mono PCM audio"
+authors = [
+    {name = "ReanGD", email = "reangd@gmail.com"},
+]
+requires-python = ">=3.13,<3.15"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+keywords = [
+    "audio",
+    "keyword-spotting",
+    "onnx",
+    "speech",
+    "streaming",
+    "vad",
+    "voice-activity-detection",
+    "wake-word",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Typing :: Typed",
+]
+dependencies = [
+    "lumivox-core @ git+https://github.com/LumivoxAI/core.git@master",
+    "numpy>=2,<3",
+    "onnxruntime>=1.24.1,<2",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18,<2",
+    "nicegui>=3.15,<4",
+    "pytest>=9,<10",
+    "ruff>=0.14,<0.15",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not model'"
+markers = [
+    "model: tests requiring the pinned external ONNX model",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+length-sort = true
+
+[tool.mypy]
+files = ["src/lumivox_wakelab", "tests", "examples"]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+[project.urls]
+Homepage = "https://github.com/LumivoxAI/wakelab"
+Documentation = "https://github.com/LumivoxAI/wakelab"
+Issues = "https://github.com/LumivoxAI/wakelab/issues"
+Source = "https://github.com/LumivoxAI/wakelab"
