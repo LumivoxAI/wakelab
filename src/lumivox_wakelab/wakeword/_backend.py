@@ -1,4 +1,4 @@
-"""Internal VAD backend contract used by the streaming orchestrator."""
+"""Internal wake-word backend contract used by the streaming orchestrator."""
 
 from typing import Protocol
 
@@ -6,7 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 
-class VadBackend(Protocol):
+class WakeWordBackend(Protocol):
     """One-stream native-frame backend with transactional ``infer`` calls.
 
     An implementation must leave its stream state unchanged when ``infer`` raises.
