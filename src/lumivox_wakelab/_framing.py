@@ -125,15 +125,22 @@ class WakeWordFramer(_Framer):
     def consume(self, timeline: AudioTimeline, end: int, /) -> list[FrameResult]:
         """Infer complete contiguous candidate frames before ``end``."""
 
+        results: list[FrameResult] = []
+        while (result := self.consume_next(timeline, end)) is not None:
+            results.append(result)
+        return results
+
+    def consume_next(self, timeline: AudioTimeline, end: int, /) -> FrameResult | None:
+        """Infer one complete candidate frame, retaining an incomplete tail."""
+
         if self._position is None:
             raise RuntimeError("wake-word candidate has not been started")
         self._validate_available_range(timeline, self._position, end)
-        results: list[FrameResult] = []
-        while self._position + self._frame_samples <= end:
-            result = self._infer(timeline, self._position)
-            self._position = result.sample_range.end
-            results.append(result)
-        return results
+        if self._position + self._frame_samples > end:
+            return None
+        result = self._infer(timeline, self._position)
+        self._position = result.sample_range.end
+        return result
 
     def end_candidate(self, end: int, /) -> None:
         """Discard an unscored candidate tail after validating its contiguous end."""
