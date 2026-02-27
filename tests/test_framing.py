@@ -119,6 +119,19 @@ def test_wake_framing_starts_at_arbitrary_candidate_position_and_ends_tail() -> 
     assert [frame.tolist() for frame in backend.frames] == [[3, 4, 5, 6], [7, 8, 9, 10]]
 
 
+def test_wake_framing_advances_only_after_each_successful_frame() -> None:
+    timeline = AudioTimeline(8)
+    append(timeline, list(range(8)))
+    backend = FakeBackend(4, failure_calls=[1])
+    framer = WakeWordFramer(backend)
+    framer.start_candidate(0)
+
+    assert framer.consume_next(timeline, 8) == FrameResult(SampleRange(0, 4), 0.0)
+    with pytest.raises(RuntimeError, match="injected"):
+        framer.consume_next(timeline, 8)
+    assert framer.position == 4
+
+
 def test_wake_candidate_rejects_overlap_and_reset_cancels_it() -> None:
     timeline = AudioTimeline(8)
     append(timeline, list(range(8)))
