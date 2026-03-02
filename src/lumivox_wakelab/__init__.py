@@ -12,6 +12,7 @@ from .stream import (
     WakePolicyConfig,
     StreamProcessingError,
 )
+from ._processor import WakeStreamProcessor
 
 __all__ = [
     "InputChunk",
@@ -24,4 +25,5 @@ __all__ = [
     "StreamStateError",
     "VadPolicyConfig",
     "WakePolicyConfig",
+    "WakeStreamProcessor",
 ]

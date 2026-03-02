@@ -25,6 +25,8 @@ class _FrameBackend(Protocol):
 
     def reset(self) -> None: ...
 
+    def close(self) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class FrameResult:
@@ -96,6 +98,11 @@ class VadFramer(_Framer):
             results.append(result)
         return results
 
+    def close(self) -> None:
+        """Close the owned backend after stream finalization."""
+
+        self._backend.close()
+
 
 class WakeWordFramer(_Framer):
     """Mechanically frame one contiguous wake-word candidate at a time."""
@@ -156,3 +163,8 @@ class WakeWordFramer(_Framer):
 
         self._backend.reset()
         self._position = None
+
+    def close(self) -> None:
+        """Close the owned backend after stream finalization."""
+
+        self._backend.close()
