@@ -40,6 +40,12 @@ class VadPolicy:
 
         return self._frontier
 
+    @property
+    def failure_is_speech(self) -> bool:
+        """Return the conservative classification for an unscored failure tail."""
+
+        return self._state in {"speech", "silence"}
+
     def start_segment(self, start: int, /) -> None:
         """Begin a new continuity segment at an absolute sample position."""
 
