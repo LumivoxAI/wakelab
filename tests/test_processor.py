@@ -10,9 +10,11 @@ from lumivox_wakelab import (
     OutputChunk,
     StreamConfig,
     VadPolicyConfig,
+    StreamCloseError,
     StreamStateError,
     WakePolicyConfig,
     WakeStreamProcessor,
+    StreamProcessingError,
 )
 
 
@@ -35,6 +37,51 @@ class FakeBackend:
 
     def close(self) -> None:
         self.close_calls += 1
+
+
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def bind(self, **values: object) -> RecordingLogger:
+        return self
+
+    def debug(self, event: str, **values: object) -> None:
+        pass
+
+    def info(self, event: str, **values: object) -> None:
+        self.events.append((event, values))
+
+    def warning(self, event: str, **values: object) -> None:
+        pass
+
+    def error(self, event: str, **values: object) -> None:
+        self.events.append((event, values))
+
+    def critical(self, event: str, **values: object) -> None:
+        pass
+
+    def exception(self, event: str, **values: object) -> None:
+        pass
+
+
+class FailingBackend(FakeBackend):
+    def __init__(self, values: list[float], fail_at: int, close_error: Exception | None = None) -> None:
+        super().__init__(values)
+        self._fail_at = fail_at
+        self._calls = 0
+        self._close_error = close_error
+
+    def infer(self, frame: np.ndarray[tuple[int], np.dtype[np.int16]]) -> float:
+        self._calls += 1
+        if self._calls == self._fail_at:
+            raise RuntimeError("injected inference failure")
+        return super().infer(frame)
+
+    def close(self) -> None:
+        super().close()
+        if self._close_error is not None:
+            raise self._close_error
 
 
 def config() -> StreamConfig:
@@ -73,7 +120,7 @@ def test_processor_conserves_audio_independent_of_input_partition() -> None:
     for partition in ([12], [1, 2, 4, 5]):
         vad = FakeBackend([0.9, 0.9, 0.1])
         wake = FakeBackend([0.0, 0.0, 0.0])
-        processor = WakeStreamProcessor(config(), vad, wake)
+        processor = WakeStreamProcessor(config(), vad, wake, logger=RecordingLogger())
         outputs = []
         start = 0
         for length in partition:
@@ -90,7 +137,7 @@ def test_processor_conserves_audio_independent_of_input_partition() -> None:
 def test_processor_retroactively_activates_and_bypasses_wake_inference() -> None:
     vad = FakeBackend([0.9, 0.9, 0.9])
     wake = FakeBackend([0.0, 0.9])
-    processor = WakeStreamProcessor(config(), vad, wake)
+    processor = WakeStreamProcessor(config(), vad, wake, logger=RecordingLogger())
 
     outputs = processor.process(chunk(list(range(12)))) + processor.finish()
 
@@ -114,7 +161,7 @@ def test_processor_retroactively_activates_and_bypasses_wake_inference() -> None
 def test_processor_finalizes_hard_boundaries_and_propagates_discontinuity() -> None:
     vad = FakeBackend([0.9, 0.9])
     wake = FakeBackend([0.0, 0.0])
-    processor = WakeStreamProcessor(config(), vad, wake)
+    processor = WakeStreamProcessor(config(), vad, wake, logger=RecordingLogger())
 
     outputs = processor.process(chunk([0, 1, 2, 3]))
     outputs.extend(processor.process(chunk([4, 5, 6, 7], generation=1)))
@@ -136,7 +183,7 @@ def test_processor_finalizes_hard_boundaries_and_propagates_discontinuity() -> N
 def test_processor_close_is_idempotent_and_finish_is_terminal() -> None:
     vad = FakeBackend([0.1])
     wake = FakeBackend([])
-    processor = WakeStreamProcessor(config(), vad, wake)
+    processor = WakeStreamProcessor(config(), vad, wake, logger=RecordingLogger())
 
     outputs = processor.process(chunk([0, 1, 2, 3]))
     outputs.extend(processor.close())
@@ -145,3 +192,52 @@ def test_processor_close_is_idempotent_and_finish_is_terminal() -> None:
     assert (vad.close_calls, wake.close_calls) == (1, 1)
     with pytest.raises(StreamStateError):
         processor.process(chunk([4]))
+
+
+def test_processor_failure_accepts_and_drains_the_complete_input_without_further_inference() -> None:
+    logger = RecordingLogger()
+    vad = FailingBackend([0.9], fail_at=2)
+    wake = FakeBackend([])
+    processor = WakeStreamProcessor(config(), vad, wake, logger=logger)
+
+    with pytest.raises(StreamProcessingError):
+        processor.process(chunk(list(range(12))))
+
+    assert processor.accepted_samples == 12
+    with pytest.raises(StreamStateError):
+        processor.process(chunk([12]))
+    outputs = processor.drain_failed()
+    assert [item[0] for item in canonical(outputs)] == list(range(12))
+    assert processor.drain_failed() == []
+    assert vad.frames == [[0, 1, 2, 3]]
+    assert any(event == "stream_processing_failed" for event, _ in logger.events)
+
+
+def test_processor_failure_drain_preserves_committed_speech_without_wake_inference() -> None:
+    vad = FakeBackend([0.9, 0.9, 0.9])
+    wake = FailingBackend([], fail_at=1)
+    processor = WakeStreamProcessor(config(), vad, wake, logger=RecordingLogger())
+
+    with pytest.raises(StreamProcessingError):
+        processor.process(chunk(list(range(12))))
+
+    outputs = processor.drain_failed()
+    assert [(sample, speech, activated) for sample, speech, activated, _, _ in canonical(outputs)] == [
+        (sample, True, False) for sample in range(12)
+    ]
+    assert wake.frames == []
+
+
+def test_processor_close_aggregates_resource_errors_after_draining() -> None:
+    vad = FailingBackend([0.1], fail_at=99, close_error=RuntimeError("vad close"))
+    wake = FailingBackend([], fail_at=99, close_error=RuntimeError("wake close"))
+    processor = WakeStreamProcessor(config(), vad, wake, logger=RecordingLogger())
+    processor.process(chunk([0, 1]))
+
+    with pytest.raises(StreamCloseError) as caught:
+        processor.close()
+
+    assert [item[0] for item in canonical(caught.value.outputs)] == [0, 1]
+    assert [str(error) for error in caught.value.errors] == ["vad close", "wake close"]
+    assert (vad.close_calls, wake.close_calls) == (1, 1)
+    assert processor.close() == []
