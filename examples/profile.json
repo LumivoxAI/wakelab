@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "name": "local-demo-v1",
+  "model_root": "../data",
+  "allow_download": true,
+  "classifier_path": "../data/oww/local/local_dnn_ex1000_64.onnx",
+  "classifier_sha256": "277fe873654cdf40f8c8bc8a033fa941cc6fecad6d7edb805f416f0027287384",
+  "vad_policy": {
+    "speech_threshold": 0.5,
+    "silence_threshold": 0.35,
+    "minimum_speech_samples": 4000,
+    "minimum_silence_samples": 1600,
+    "left_padding_samples": 480,
+    "right_padding_samples": 480
+  },
+  "wake_policy": {
+    "score_threshold": 0.4,
+    "consecutive_score_count": 3,
+    "silence_bridge_samples": 8000,
+    "pre_roll_samples": 24000
+  },
+  "max_retained_audio_samples": 160000
+}
