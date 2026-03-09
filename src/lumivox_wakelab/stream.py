@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from .diagnostics import DiagnosticDrain
+
 _PCM16_DTYPE = np.dtype("<i2")
 
 
@@ -156,6 +158,8 @@ class StreamProcessor(Protocol):
     def finish(self) -> list[OutputChunk]: ...
 
     def drain_failed(self) -> list[OutputChunk]: ...
+
+    def drain_diagnostics(self) -> DiagnosticDrain: ...
 
     def close(self) -> list[OutputChunk]: ...
 

@@ -34,6 +34,7 @@ class ActivationLifecycle:
         self._position: int | None = None
         self._state = ActivationState.ARMED
         self._trigger: WakeDecision | None = None
+        self._rearm_boundary: int | None = None
 
     @property
     def state(self) -> ActivationState:
@@ -85,7 +86,9 @@ class ActivationLifecycle:
         if decision is not None and not isinstance(decision, WakeDecision):
             raise TypeError("decision must be a WakeDecision or None")
         if decision is not None:
-            if self._state is ActivationState.ACTIVATED:
+            if self._state is ActivationState.ACTIVATED and (
+                self._rearm_boundary is None or decision.activation_start < self._rearm_boundary
+            ):
                 raise RuntimeError("activation is already latched")
             if not self._position <= decision.activation_start <= end:
                 raise ValueError("activation start must be within consumed ranges")
@@ -94,19 +97,27 @@ class ActivationLifecycle:
         activation_start = decision.activation_start if decision is not None else None
         for vad_range in ranges:
             sample_range = vad_range.sample_range
+            boundaries = [sample_range.start, sample_range.end]
             if activation_start is not None and sample_range.start < activation_start < sample_range.end:
-                self._append(output, sample_range.start, activation_start, vad_range.is_speech, False)
-                self._append(output, activation_start, sample_range.end, vad_range.is_speech, True)
-            else:
-                activated = self._state is ActivationState.ACTIVATED or (
-                    activation_start is not None and sample_range.start >= activation_start
+                boundaries.append(activation_start)
+            if self._rearm_boundary is not None and sample_range.start < self._rearm_boundary < sample_range.end:
+                boundaries.append(self._rearm_boundary)
+            boundaries.sort()
+            for start, finish in zip(boundaries, boundaries[1:]):
+                before_rearm = self._rearm_boundary is None or start < self._rearm_boundary
+                activated = (before_rearm and self._state is ActivationState.ACTIVATED) or (
+                    activation_start is not None and start >= activation_start
                 )
-                self._append(output, sample_range.start, sample_range.end, vad_range.is_speech, activated)
+                self._append(output, start, finish, vad_range.is_speech, activated)
 
         self._position = end
         if decision is not None:
             self._state = ActivationState.ACTIVATED
             self._trigger = decision
+            self._rearm_boundary = None
+        elif self._rearm_boundary is not None and end >= self._rearm_boundary:
+            self._state = ActivationState.ARMED
+            self._rearm_boundary = None
         elif self._state is not ActivationState.ACTIVATED:
             self._state = ActivationState.EVALUATING if evaluating else ActivationState.ARMED
         return output
@@ -114,12 +125,19 @@ class ActivationLifecycle:
     def rearm(self, boundary: int, /) -> None:
         """Clear activation at the next not-yet-accepted sample boundary."""
 
-        if self._position is None:
-            raise RuntimeError("activation segment has not been started")
         self._validate_position("re-arm boundary", boundary)
-        if boundary != self._position:
-            raise ValueError("re-arm boundary must be the next unconsumed sample")
-        self._state = ActivationState.ARMED
+        if self._position is None:
+            self._state = ActivationState.ARMED
+            self._trigger = None
+            self._rearm_boundary = None
+            return
+        if boundary < self._position:
+            raise ValueError("re-arm boundary cannot precede the next unconsumed sample")
+        if boundary == self._position:
+            self._state = ActivationState.ARMED
+            self._rearm_boundary = None
+        else:
+            self._rearm_boundary = boundary
         self._trigger = None
 
     def finish_segment(self, end: int, /) -> None:
@@ -133,6 +151,7 @@ class ActivationLifecycle:
         if self._state is ActivationState.EVALUATING:
             self._state = ActivationState.ARMED
         self._position = None
+        self._rearm_boundary = None
 
     def _validate_ranges(self, ranges: list[VadRange]) -> int:
         assert self._position is not None
