@@ -236,6 +236,7 @@ def test_stream_processor_protocol_has_the_public_operation_shape() -> None:
         "discontinue",
         "finish",
         "drain_failed",
+        "drain_diagnostics",
         "close",
     }
 
@@ -254,8 +255,16 @@ def test_stream_error_hierarchy_and_close_payload() -> None:
 
 def test_top_level_exports_are_intentional() -> None:
     assert lumivox_wakelab.__all__ == [
+        "ActivationDiagnostic",
+        "ContinuityBoundaryDiagnostic",
+        "ContinuityBoundaryReason",
+        "DiagnosticDrain",
+        "DiagnosticEvent",
+        "DiagnosticFailureOperation",
+        "FailureDiagnostic",
         "InputChunk",
         "OutputChunk",
+        "RearmDiagnostic",
         "StreamCloseError",
         "StreamConfig",
         "StreamError",
@@ -263,6 +272,13 @@ def test_top_level_exports_are_intentional() -> None:
         "StreamProcessor",
         "StreamStateError",
         "VadPolicyConfig",
+        "VadFrameDiagnostic",
+        "VadSpeechDiagnostic",
+        "VadTransitionReason",
+        "WakeCandidateEndedDiagnostic",
+        "WakeCandidateEndReason",
+        "WakeCandidateStartedDiagnostic",
+        "WakeFrameDiagnostic",
         "WakePolicyConfig",
         "WakeStreamProcessor",
     ]

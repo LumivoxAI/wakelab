@@ -94,6 +94,18 @@ def test_rearm_clears_latch_and_evaluation_at_next_unconsumed_boundary() -> None
     assert after_rearm == [(4, 8, True, False)]
 
 
+def test_new_decision_after_scheduled_rearm_activates_from_new_boundary() -> None:
+    lifecycle = ActivationLifecycle()
+    lifecycle.start_segment(0)
+    output_values(lifecycle, ranges((0, 4, True)), decision(0), evaluating=True)
+    lifecycle.rearm(8)
+
+    actual = output_values(lifecycle, ranges((4, 12, True)), decision(8), evaluating=True)
+
+    assert actual == [(4, 12, True, True)]
+    assert lifecycle.state is ActivationState.ACTIVATED
+
+
 def test_finish_rejects_unresolved_evaluation_and_preserves_confirmed_activation() -> None:
     lifecycle = ActivationLifecycle()
     lifecycle.start_segment(0)

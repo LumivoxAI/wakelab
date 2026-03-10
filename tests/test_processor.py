@@ -14,6 +14,7 @@ from lumivox_wakelab import (
     StreamStateError,
     WakePolicyConfig,
     WakeStreamProcessor,
+    ActivationDiagnostic,
     StreamProcessingError,
 )
 
@@ -158,6 +159,23 @@ def test_processor_retroactively_activates_and_bypasses_wake_inference() -> None
     assert wake.frames == [[0, 1, 2, 3], [4, 5, 6, 7]]
 
 
+def test_processor_can_activate_again_after_rearm_in_same_segment() -> None:
+    vad = FakeBackend([0.9, 0.9, 0.9, 0.9])
+    wake = FakeBackend([0.9, 0.9])
+    processor = WakeStreamProcessor(config(), vad, wake, logger=RecordingLogger(), diagnostic_event_capacity=64)
+
+    first = processor.process(chunk(list(range(8))))
+    rearmed = processor.rearm()
+    second = processor.process(chunk(list(range(8, 16))))
+    outputs = first + rearmed + second + processor.finish()
+
+    assert wake.frames == [[0, 1, 2, 3], [8, 9, 10, 11]]
+    assert wake.reset_calls == 4
+    activations = [item for item in processor.drain_diagnostics().events if isinstance(item, ActivationDiagnostic)]
+    assert [(item.activation_start_sample, item.confirming_end_sample) for item in activations] == [(0, 4), (8, 12)]
+    assert [activated for sample, _, activated, _, _ in canonical(outputs) if sample in {2, 10}] == [True, True]
+
+
 def test_processor_finalizes_hard_boundaries_and_propagates_discontinuity() -> None:
     vad = FakeBackend([0.9, 0.9])
     wake = FakeBackend([0.0, 0.0])
@@ -180,6 +198,59 @@ def test_processor_finalizes_hard_boundaries_and_propagates_discontinuity() -> N
     assert vad.reset_calls == 2
 
 
+def test_processor_input_discontinuity_resets_without_crossing_frames() -> None:
+    vad = FakeBackend([0.1])
+    wake = FakeBackend([])
+    processor = WakeStreamProcessor(config(), vad, wake, logger=RecordingLogger())
+
+    outputs = processor.process(chunk([0, 1]))
+    outputs.extend(processor.process(chunk([2, 3, 4, 5], discontinuity=True)))
+    outputs.extend(processor.finish())
+
+    assert [item[0] for item in canonical(outputs)] == list(range(6))
+    assert vad.frames == [[2, 3, 4, 5]]
+    assert vad.reset_calls == 2
+    assert [(output.generation, output.discontinuity) for output in outputs] == [(0, False), (0, True)]
+
+
+def test_processor_retention_validation_covers_left_padding_and_silence_bridge() -> None:
+    left_padding = StreamConfig(
+        VadPolicyConfig(0.6, 0.4, 4, 4, 8, 0),
+        WakePolicyConfig(0.7, 1, 0, 0),
+        16,
+    )
+    bridge = StreamConfig(
+        VadPolicyConfig(0.6, 0.4, 4, 4, 0, 0),
+        WakePolicyConfig(0.7, 1, 10, 0),
+        16,
+    )
+
+    with pytest.raises(ValueError, match="at least 16"):
+        WakeStreamProcessor(
+            StreamConfig(left_padding.vad_policy, left_padding.wake_policy, 15),
+            FakeBackend([]),
+            FakeBackend([]),
+            logger=RecordingLogger(),
+        )
+    with pytest.raises(ValueError, match="at least 16"):
+        WakeStreamProcessor(
+            StreamConfig(bridge.vad_policy, bridge.wake_policy, 15),
+            FakeBackend([]),
+            FakeBackend([]),
+            logger=RecordingLogger(),
+        )
+
+    left_vad = FakeBackend([0.1, 0.1, 0.1, 0.9, 0.9])
+    left_processor = WakeStreamProcessor(left_padding, left_vad, FakeBackend([0.0] * 5), logger=RecordingLogger())
+    left_outputs = left_processor.process(chunk(list(range(20)))) + left_processor.finish()
+    assert [item[0] for item in canonical(left_outputs)] == list(range(20))
+
+    bridge_vad = FakeBackend([0.9, 0.9, 0.1, 0.1, 0.1])
+    bridge_processor = WakeStreamProcessor(bridge, bridge_vad, FakeBackend([0.0, 0.0]), logger=RecordingLogger())
+    bridge_outputs = bridge_processor.process(chunk(list(range(20)))) + bridge_processor.finish()
+    assert [item[0] for item in canonical(bridge_outputs)] == list(range(20))
+
+
 def test_processor_close_is_idempotent_and_finish_is_terminal() -> None:
     vad = FakeBackend([0.1])
     wake = FakeBackend([])
@@ -190,6 +261,18 @@ def test_processor_close_is_idempotent_and_finish_is_terminal() -> None:
     assert [item[0] for item in canonical(outputs)] == [0, 1, 2, 3]
     assert processor.close() == []
     assert (vad.close_calls, wake.close_calls) == (1, 1)
+    with pytest.raises(StreamStateError):
+        processor.process(chunk([4]))
+
+
+def test_processor_finish_is_idempotent() -> None:
+    processor = WakeStreamProcessor(config(), FakeBackend([0.1]), FakeBackend([]), logger=RecordingLogger())
+
+    outputs = processor.process(chunk([0, 1, 2, 3]))
+    outputs.extend(processor.finish())
+
+    assert [item[0] for item in canonical(outputs)] == [0, 1, 2, 3]
+    assert processor.finish() == []
     with pytest.raises(StreamStateError):
         processor.process(chunk([4]))
 

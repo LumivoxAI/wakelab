@@ -92,7 +92,7 @@ def test_score_confirmation_anchors_pre_roll_to_first_qualifying_frame() -> None
 
     update = policy.consume(timeline, ranges((0, 12, True)))
 
-    assert update.decision == WakeDecision(1, SampleRange(4, 8), SampleRange(8, 12))
+    assert update.decision == WakeDecision(1, SampleRange(4, 8), SampleRange(8, 12), 0.5, 0.9)
     assert update.safe_frontier == 1
 
 
@@ -141,7 +141,7 @@ def test_rearm_and_finish_reject_unconfirmed_hits() -> None:
     finished = policy.finish(10)
 
     assert update.decision is None
-    assert backend.reset_calls == 2
+    assert backend.reset_calls == 4
     assert finished.safe_frontier == 10
 
 
