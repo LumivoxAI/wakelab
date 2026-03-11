@@ -474,6 +474,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumivox-devicelab"
+version = "0.1.0"
+source = { git = "https://github.com/LumivoxAI/devicelab.git?rev=master#3430d1693ee90096d1b26d336fd1932937f2fd40" }
+dependencies = [
+    { name = "lumivox-core" },
+    { name = "numpy" },
+]
+
+[[package]]
 name = "lumivox-wakelab"
 version = "0.1.0"
 source = { editable = "." }
@@ -485,6 +494,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "lumivox-devicelab" },
     { name = "mypy" },
     { name = "nicegui" },
     { name = "pytest" },
@@ -500,6 +510,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "lumivox-devicelab", git = "https://github.com/LumivoxAI/devicelab.git?rev=master" },
     { name = "mypy", specifier = ">=1.18,<2" },
     { name = "nicegui", specifier = ">=3.15,<4" },
     { name = "pytest", specifier = ">=9,<10" },
