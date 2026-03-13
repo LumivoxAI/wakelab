@@ -3,7 +3,7 @@
   "name": "local-demo-v1",
   "model_root": "../data",
   "allow_download": true,
-  "classifier_path": "../data/oww/local/local_dnn_ex1000_64.onnx",
+  "classifier_path": "../data/oww/local/dnn_ex1000_64.onnx",
   "classifier_sha256": "277fe873654cdf40f8c8bc8a033fa941cc6fecad6d7edb805f416f0027287384",
   "vad_policy": {
     "speech_threshold": 0.5,

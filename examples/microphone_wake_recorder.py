@@ -41,7 +41,7 @@ from tools.wake_pipeline_support.profile import (
 
 SAMPLE_RATE = 16_000
 DEFAULT_OUTPUT = Path("wake-recording.wav")
-DEFAULT_PROFILE = Path(__file__).with_name("microphone_profile.json")
+DEFAULT_PROFILE = Path(__file__).with_name("profile.json")
 
 
 def select_microphone(snapshot: DeviceSnapshot, requested_id: str | None) -> AudioDevice:
