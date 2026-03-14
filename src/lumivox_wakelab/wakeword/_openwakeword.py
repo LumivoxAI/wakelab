@@ -316,8 +316,13 @@ class OpenWakeWord:
         classifier_path: str | os.PathLike[str],
         *,
         logger: Logger,
+        classifier_bytes: bytes | None = None,
     ) -> Self:
-        """Return a verified, warmed, deterministic openWakeWord backend."""
+        """Return a verified, warmed, deterministic openWakeWord backend.
+
+        ``classifier_bytes`` lets an integration verify and load the same immutable
+        snapshot while ``classifier_path`` remains its diagnostic identity.
+        """
 
         bound_logger = logger.bind(module="wakelab", component="openwakeword")
         feature_directory = Path(feature_model_dir)
@@ -329,12 +334,17 @@ class OpenWakeWord:
         try:
             mel_bytes = read_verified_artifact(feature_directory / _MELSPECTROGRAM_FILENAME, MELSPECTROGRAM_MANIFEST)
             embedding_bytes = read_verified_artifact(feature_directory / _EMBEDDING_FILENAME, EMBEDDING_MANIFEST)
-            try:
-                classifier_bytes = classifier_path_object.read_bytes()
-            except OSError as exc:
-                raise WakeWordInitializationError(
-                    f"Cannot read trusted wake-word classifier: {classifier_path_object}"
-                ) from exc
+            if classifier_bytes is None:
+                try:
+                    classifier_snapshot = classifier_path_object.read_bytes()
+                except OSError as exc:
+                    raise WakeWordInitializationError(
+                        f"Cannot read trusted wake-word classifier: {classifier_path_object}"
+                    ) from exc
+            elif not isinstance(classifier_bytes, bytes):
+                raise TypeError("classifier_bytes must be bytes or None")
+            else:
+                classifier_snapshot = classifier_bytes
 
             import onnxruntime as ort  # type: ignore[import-untyped]
 
@@ -349,7 +359,7 @@ class OpenWakeWord:
             options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
             sessions: list[_InferenceSession] = []
-            for model_bytes in (mel_bytes, embedding_bytes, classifier_bytes):
+            for model_bytes in (mel_bytes, embedding_bytes, classifier_snapshot):
                 session = cast(
                     _InferenceSession,
                     ort.InferenceSession(model_bytes, sess_options=options, providers=list(_REQUESTED_PROVIDERS)),
@@ -365,9 +375,6 @@ class OpenWakeWord:
             _validate_feature_schemas(mel_session, embedding_session)
             classifier_input, classifier_output, history_frames = _validate_classifier_schema(classifier_session)
             mel_template, embedding_template = _silence_templates(mel_session, embedding_session)
-            classifier_features = embedding_template[-history_frames:][None, :, :].astype(np.float32, copy=False)
-            _run_classifier(classifier_session, classifier_input, classifier_output, classifier_features)
-
             instance = cls(
                 mel_session,
                 embedding_session,
@@ -380,6 +387,8 @@ class OpenWakeWord:
                 _REQUESTED_PROVIDERS,
                 bound_logger,
             )
+            instance.infer(np.zeros(_FRAME_SAMPLES, dtype=np.dtype("<i2")))
+            instance.reset()
         except ArtifactError as exc:
             bound_logger.error("openwakeword_initialization_failed", error=str(exc))
             raise

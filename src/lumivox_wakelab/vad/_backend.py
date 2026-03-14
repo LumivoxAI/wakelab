@@ -1,4 +1,4 @@
-"""Internal VAD backend contract used by the streaming orchestrator."""
+"""Supported replaceable VAD backend contract."""
 
 from typing import Protocol
 
@@ -9,7 +9,8 @@ from numpy.typing import NDArray
 class VadBackend(Protocol):
     """One-stream native-frame backend with transactional ``infer`` calls.
 
-    An implementation must leave its stream state unchanged when ``infer`` raises.
+    ``infer`` consumes exactly ``frame_samples`` PCM samples and returns a finite
+    probability in ``[0, 1]``. An implementation must leave its stream state unchanged when ``infer`` raises.
     ``reset`` restores deterministic stream state and ``close`` is terminal and
     idempotent.
     """

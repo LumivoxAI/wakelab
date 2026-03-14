@@ -93,7 +93,7 @@ class AudioTimeline:
 
         start = self._end
         end = start + length
-        discontinuity = starts_segment and self._generation is not None
+        discontinuity = starts_segment and (chunk.discontinuity or self._generation is not None)
         anchor = _Anchor(
             position=start,
             running_time_ns=chunk.running_time_ns,
@@ -152,22 +152,26 @@ class AudioTimeline:
         anchor = self._anchors[bisect_right(positions, position) - 1]
         offset = position - anchor.position
         return SourceMetadata(
-            running_time_ns=self._interpolate(anchor.running_time_ns, offset),
-            captured_at_ns=self._interpolate(anchor.captured_at_ns, offset),
+            running_time_ns=self._interpolate_running_time(anchor.running_time_ns, offset),
+            captured_at_ns=self._interpolate_timestamp(anchor.captured_at_ns, offset),
             generation=anchor.generation,
             discontinuity=anchor.discontinuity and position == anchor.position,
         )
 
     def _validate_running_time(self, running_time_ns: int) -> None:
         anchor = self._anchors[-1]
-        expected = self._interpolate(anchor.running_time_ns, self._end - anchor.position)
+        expected = self._interpolate_running_time(anchor.running_time_ns, self._end - anchor.position)
         if abs(running_time_ns - expected) > _SAMPLE_PERIOD_NS:
             raise ValueError("running_time_ns disagrees with the sample timeline")
 
     @staticmethod
-    def _interpolate(timestamp_ns: int, sample_offset: int) -> int:
+    def _interpolate_running_time(timestamp_ns: int, sample_offset: int) -> int:
         if timestamp_ns == 0:
             return 0
+        return AudioTimeline._interpolate_timestamp(timestamp_ns, sample_offset)
+
+    @staticmethod
+    def _interpolate_timestamp(timestamp_ns: int, sample_offset: int) -> int:
         return timestamp_ns + sample_offset * _NANOSECONDS_PER_SECOND // _SAMPLE_RATE
 
     def _validate_range(self, start: int, end: int) -> None:

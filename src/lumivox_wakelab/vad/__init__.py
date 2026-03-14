@@ -22,6 +22,7 @@ from ._silero import (
     VadInferenceError,
     VadInitializationError,
 )
+from ._backend import VadBackend
 
 
 def ensure_silero_vad_model(
@@ -53,5 +54,6 @@ __all__ = [
     "VadError",
     "VadInferenceError",
     "VadInitializationError",
+    "VadBackend",
     "ensure_silero_vad_model",
 ]

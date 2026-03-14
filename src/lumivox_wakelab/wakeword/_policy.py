@@ -53,7 +53,6 @@ class WakePolicy:
             raise TypeError("framer must be a WakeWordFramer")
         self._config = config
         self._framer = framer
-        self._segment_start: int | None = None
         self._position: int | None = None
         self._candidate_start: int | None = None
         self._gap_start: int | None = None
@@ -94,7 +93,6 @@ class WakePolicy:
         if self._position is not None:
             raise RuntimeError("wake-policy segment is already active")
         self._framer.reset()
-        self._segment_start = start
         self._position = start
         self._candidate_start = None
         self._gap_start = None
@@ -130,8 +128,11 @@ class WakePolicy:
                     break
                 self._position = sample_range.end
             elif self._candidate_start is not None:
-                self._position = sample_range.end
-                self._handle_gap(sample_range)
+                found = self._handle_gap(timeline, sample_range)
+                if found is not None:
+                    decision = found
+                    self._position = sample_range.end
+                    break
             else:
                 self._position = sample_range.end
 
@@ -176,7 +177,6 @@ class WakePolicy:
         frontier = self.safe_frontier
         assert frontier is not None
         self._position = None
-        self._segment_start = None
         self._generation = None
         return WakePolicyUpdate(None, frontier)
 
@@ -189,12 +189,18 @@ class WakePolicy:
             assert self._generation is not None
             self._diagnostics.append(WakeCandidateStartedDiagnostic(self._generation, start))
 
-    def _handle_gap(self, sample_range: SampleRange) -> None:
+    def _handle_gap(self, timeline: AudioTimeline, sample_range: SampleRange) -> WakeDecision | None:
         if self._gap_start is None:
             self._gap_start = sample_range.start
         assert self._gap_start is not None
-        if sample_range.end - self._gap_start > self._config.silence_bridge_samples:
+        bridge_end = self._gap_start + self._config.silence_bridge_samples
+        found = self._consume_through(timeline, min(sample_range.end, bridge_end))
+        if found is not None:
+            return found
+        self._position = sample_range.end
+        if sample_range.end > bridge_end:
             self._end_candidate(WakeCandidateEndReason.SILENCE_BRIDGE_EXCEEDED)
+        return None
 
     def _consume_through(self, timeline: AudioTimeline, end: int) -> WakeDecision | None:
         while (result := self._framer.consume_next(timeline, end)) is not None:

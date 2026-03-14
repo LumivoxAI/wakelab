@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import suppress
 from collections import deque
 
 from lumivox_core.logger import Logger
@@ -10,6 +11,7 @@ from lumivox_core.logger import Logger
 from .stream import InputChunk, OutputChunk, StreamConfig, StreamCloseError, StreamStateError, StreamProcessingError
 from ._framing import VadFramer, WakeWordFramer
 from ._timeline import SampleRange, AudioTimeline
+from ._retention import required_retained_audio_samples
 from ._activation import ActivationRange, ActivationLifecycle
 from .diagnostics import (
     DiagnosticDrain,
@@ -53,20 +55,10 @@ class WakeStreamProcessor:
         self._diagnostics = DiagnosticCollector(diagnostic_event_capacity) if diagnostic_event_capacity else None
         self._vad_framer = VadFramer(vad_backend)
         self._wake_framer = WakeWordFramer(wake_backend)
-        vad_frame = self._vad_framer.frame_samples
-        wake_frame = self._wake_framer.frame_samples
-        # The policy only tests a candidate duration after its second frame.
-        speech_confirmation = vad_frame * max(
-            2, (config.vad_policy.minimum_speech_samples + vad_frame - 1) // vad_frame
-        )
-        silence_confirmation = vad_frame * max(
-            2, (config.vad_policy.minimum_silence_samples + vad_frame - 1) // vad_frame
-        )
-        silence_bridge = vad_frame * (config.wake_policy.silence_bridge_samples // vad_frame + 1)
-        required = max(
-            config.vad_policy.left_padding_samples + speech_confirmation,
-            wake_frame + config.wake_policy.pre_roll_samples + silence_confirmation,
-            wake_frame + config.wake_policy.pre_roll_samples + silence_bridge,
+        required = required_retained_audio_samples(
+            config,
+            self._vad_framer.frame_samples,
+            self._wake_framer.frame_samples,
         )
         if config.max_retained_audio_samples < required:
             raise ValueError(f"max_retained_audio_samples must be at least {required}")
@@ -84,6 +76,14 @@ class WakeStreamProcessor:
         self._failed = False
         self._failure_outputs: list[OutputChunk] = []
         self._failure_tail: InputChunk | None = None
+        self._failure_tail_is_speech = False
+        self._failure_drained = False
+        self._final_vad_ranges: list[VadRange] | None = None
+        self._vad_finalization_attempted = False
+        self._final_vad_consumed = 0
+        self._wake_finalized = False
+        self._segment_output_assembled = False
+        self._activation_finalized = False
         self._accepted_samples = 0
         self._emitted_samples = 0
         self._diagnostic_vad_speech = False
@@ -171,28 +171,8 @@ class WakeStreamProcessor:
                 offset += length
                 outputs.extend(self._advance())
         except Exception as exc:
-            self._failed = True
-            self._failure_outputs = outputs
-            if offset < owned.samples.size:
-                self._failure_tail = self._part(owned, offset, owned.samples.size - offset)
-            self._logger.error(
-                "stream_processing_failed",
-                generation=owned.generation,
-                position=self._timeline.next_position,
-                pending_samples=self._timeline.retained_samples,
-                error=str(exc),
-            )
-            if self._diagnostics is not None:
-                self._diagnostics.append(
-                    FailureDiagnostic(
-                        owned.generation,
-                        self._timeline.next_position,
-                        self._accepted_samples,
-                        DiagnosticFailureOperation.PROCESS,
-                        type(exc).__name__,
-                        str(exc),
-                    )
-                )
+            tail = self._part(owned, offset, owned.samples.size - offset) if offset < owned.samples.size else None
+            self._enter_failure(exc, outputs, DiagnosticFailureOperation.PROCESS, tail=tail)
             raise StreamProcessingError("processing failed after accepting the complete input chunk") from exc
         return self._release(outputs)
 
@@ -200,35 +180,48 @@ class WakeStreamProcessor:
         """Cancel wake evaluation and clear the activation latch for future audio."""
 
         self._require_open()
-        outputs = self._advance() if self._segment_active else []
-        boundary = self._timeline.next_position
-        # Pending VAD evidence is not yet public, so it belongs to the new armed state.
-        if self._wake_policy.evaluating:
-            self._logger.info("wake_candidate_rejected", position=boundary, reason="rearmed")
-        self._wake_policy.rearm(boundary)
-        self._activation.rearm(boundary)
-        if self._diagnostics is not None:
-            self._diagnostics.append(RearmDiagnostic(self._generation, boundary))
-        self._logger.info("stream_rearmed", position=boundary, pending_samples=self.retained_samples)
+        outputs: list[OutputChunk] = []
+        try:
+            outputs.extend(self._advance() if self._segment_active else [])
+            boundary = self._timeline.next_position
+            # Pending VAD evidence is not yet public, so it belongs to the new armed state.
+            if self._wake_policy.evaluating:
+                self._logger.info("wake_candidate_rejected", position=boundary, reason="rearmed")
+            self._wake_policy.rearm(boundary)
+            self._activation.rearm(boundary)
+            if self._segment_active:
+                outputs.extend(self._emit_through(boundary, evaluating=False))
+            if self._diagnostics is not None:
+                self._diagnostics.append(RearmDiagnostic(self._generation, boundary))
+            self._logger.info("stream_rearmed", position=boundary, pending_samples=self.retained_samples)
+        except Exception as exc:
+            self._enter_failure(exc, outputs, DiagnosticFailureOperation.FINALIZE)
+            raise StreamProcessingError("re-arm failed and made the processor terminal") from exc
         return self._release(outputs)
 
     def discontinue(self) -> list[OutputChunk]:
         """Finalize the current continuity segment without ending the processor."""
 
         self._require_open()
-        previous_generation = self._generation
-        outputs = self._finish_segment(WakeCandidateEndReason.CONTINUITY_BOUNDARY) if self._segment_active else []
-        self._force_next_discontinuity = True
-        if self._diagnostics is not None:
-            self._diagnostics.append(
-                ContinuityBoundaryDiagnostic(
-                    self._timeline.next_position,
-                    previous_generation,
-                    None,
-                    ContinuityBoundaryReason.EXPLICIT_DISCONTINUE,
+        outputs: list[OutputChunk] = []
+        try:
+            previous_generation = self._generation
+            if self._segment_active:
+                outputs.extend(self._finish_segment(WakeCandidateEndReason.CONTINUITY_BOUNDARY))
+            self._force_next_discontinuity = True
+            if self._diagnostics is not None:
+                self._diagnostics.append(
+                    ContinuityBoundaryDiagnostic(
+                        self._timeline.next_position,
+                        previous_generation,
+                        None,
+                        ContinuityBoundaryReason.EXPLICIT_DISCONTINUE,
+                    )
                 )
-            )
-        self._logger.info("stream_discontinued", position=self._timeline.next_position)
+            self._logger.info("stream_discontinued", position=self._timeline.next_position)
+        except Exception as exc:
+            self._enter_failure(exc, outputs, DiagnosticFailureOperation.FINALIZE)
+            raise StreamProcessingError("discontinuity finalization failed and made the processor terminal") from exc
         return self._release(outputs)
 
     def finish(self) -> list[OutputChunk]:
@@ -237,9 +230,15 @@ class WakeStreamProcessor:
         if self._finished:
             return []
         self._require_open()
-        outputs = self._finish_segment(WakeCandidateEndReason.FINISHED) if self._segment_active else []
-        self._finished = True
-        self._logger.info("stream_finished", position=self._timeline.next_position)
+        outputs: list[OutputChunk] = []
+        try:
+            if self._segment_active:
+                outputs.extend(self._finish_segment(WakeCandidateEndReason.FINISHED))
+            self._finished = True
+            self._logger.info("stream_finished", position=self._timeline.next_position)
+        except Exception as exc:
+            self._enter_failure(exc, outputs, DiagnosticFailureOperation.FINALIZE)
+            raise StreamProcessingError("stream finalization failed and made the processor terminal") from exc
         return self._release(outputs)
 
     def drain_failed(self) -> list[OutputChunk]:
@@ -247,40 +246,68 @@ class WakeStreamProcessor:
 
         if not self._failed:
             raise StreamStateError("processor has not entered a terminal failure state")
-        outputs = self._failure_outputs
-        self._failure_outputs = []
-        tail_is_speech = False
+        if self._failure_drained:
+            return []
         if self._segment_active:
             end = self._timeline.next_position
-            final_vad = self._vad_policy.finish(end)
-            self._record_vad_ranges(final_vad, VadTransitionReason.PROCESSING_FAILURE)
-            self._pending_vad.extend(final_vad)
-            tail_is_speech = self._vad_policy.failure_is_speech
-            if self._wake_policy.evaluating:
-                self._logger.info("wake_candidate_rejected", position=end, reason="processing_failed")
-            try:
-                self._wake_policy.finish(end, reason=WakeCandidateEndReason.PROCESSING_FAILED)
-            except Exception:
-                pass
-            outputs.extend(self._emit_through(end, evaluating=False))
-            self._activation.finish_segment(end)
+            if self._final_vad_ranges is None:
+                self._failure_tail_is_speech = self._vad_policy.failure_is_speech
+                if not self._vad_finalization_attempted:
+                    self._vad_finalization_attempted = True
+                    try:
+                        self._final_vad_ranges = self._vad_policy.finish(end)
+                    except Exception:
+                        pass
+                    else:
+                        self._record_vad_ranges(self._final_vad_ranges, VadTransitionReason.PROCESSING_FAILURE)
+                if self._final_vad_ranges is None:
+                    self._final_vad_ranges = []
+                    start = (
+                        self._pending_vad[-1].sample_range.end
+                        if self._pending_vad
+                        else self._timeline.retained_range.start
+                    )
+                    if start < end:
+                        self._pending_vad.append(VadRange(SampleRange(start, end), self._failure_tail_is_speech))
+            while self._final_vad_consumed < len(self._final_vad_ranges):
+                self._pending_vad.append(self._final_vad_ranges[self._final_vad_consumed])
+                self._final_vad_consumed += 1
+            if not self._wake_finalized:
+                if self._wake_policy.evaluating:
+                    self._logger.info("wake_candidate_rejected", position=end, reason="processing_failed")
+                try:
+                    self._wake_policy.finish(end, reason=WakeCandidateEndReason.PROCESSING_FAILED)
+                finally:
+                    self._wake_finalized = True
+            if not self._segment_output_assembled:
+                assembled = self._emit_through(end, evaluating=False)
+                self._failure_outputs.extend(assembled)
+                self._segment_output_assembled = True
+            if not self._activation_finalized:
+                try:
+                    self._activation.finish_segment(end)
+                finally:
+                    self._activation_finalized = True
             self._segment_active = False
             self._generation = None
         if self._failure_tail is not None:
             tail = self._failure_tail
-            self._failure_tail = None
-            outputs.append(
-                OutputChunk(
-                    tail.samples.copy(),
-                    tail.running_time_ns,
-                    tail.captured_at_ns,
-                    tail.generation,
-                    tail.discontinuity,
-                    tail_is_speech,
-                    self._activation.state.value == "activated",
-                )
+            output = OutputChunk(
+                tail.samples.copy(),
+                tail.running_time_ns,
+                tail.captured_at_ns,
+                tail.generation,
+                tail.discontinuity,
+                self._failure_tail_is_speech,
+                self._activation.state.value == "activated",
             )
-        self._logger.info("stream_failure_drained", accepted_samples=self.accepted_samples, pending_samples=0)
+            self._failure_outputs.append(output)
+            self._failure_tail = None
+        outputs = self._failure_outputs
+        with suppress(Exception):
+            self._logger.info("stream_failure_drained", accepted_samples=self.accepted_samples, pending_samples=0)
+        self._failure_outputs = []
+        self._failure_drained = True
         return self._release(outputs)
 
     def close(self) -> list[OutputChunk]:
@@ -288,53 +315,44 @@ class WakeStreamProcessor:
 
         if self._closed:
             return []
+        errors: list[BaseException] = []
+        outputs: list[OutputChunk] = []
         try:
             outputs = self.drain_failed() if self._failed else (self.finish() if not self._finished else [])
         except Exception as exc:
-            self._failed = True
-            self._logger.error(
-                "stream_finalization_failed",
-                position=self._timeline.next_position,
-                pending_samples=self._timeline.retained_samples,
-                error=str(exc),
-            )
-            if self._diagnostics is not None:
-                self._diagnostics.append(
-                    FailureDiagnostic(
-                        self._generation,
-                        self._timeline.next_position,
-                        self._accepted_samples,
-                        DiagnosticFailureOperation.FINALIZE,
-                        type(exc).__name__,
-                        str(exc),
-                    )
-                )
-            outputs = self.drain_failed()
-        errors: list[BaseException] = []
+            errors.append(exc)
+            if not self._failed:
+                self._enter_failure(exc, [], DiagnosticFailureOperation.FINALIZE)
+            try:
+                outputs.extend(self.drain_failed())
+            except Exception as drain_error:
+                errors.append(drain_error)
         for component, framer in (("vad", self._vad_framer), ("wake", self._wake_framer)):
             try:
                 framer.close()
             except Exception as exc:
                 errors.append(exc)
-                self._logger.error("stream_resource_close_failed", component=component, error=str(exc))
-                if self._diagnostics is not None:
-                    operation = (
-                        DiagnosticFailureOperation.VAD_CLOSE
-                        if component == "vad"
-                        else DiagnosticFailureOperation.WAKE_CLOSE
-                    )
-                    self._diagnostics.append(
-                        FailureDiagnostic(
-                            self._generation,
-                            self._timeline.next_position,
-                            self._accepted_samples,
-                            operation,
-                            type(exc).__name__,
-                            str(exc),
+                with suppress(Exception):
+                    self._logger.error("stream_resource_close_failed", component=component, error=str(exc))
+                    if self._diagnostics is not None:
+                        operation = (
+                            DiagnosticFailureOperation.VAD_CLOSE
+                            if component == "vad"
+                            else DiagnosticFailureOperation.WAKE_CLOSE
                         )
-                    )
+                        self._diagnostics.append(
+                            FailureDiagnostic(
+                                self._generation,
+                                self._timeline.next_position,
+                                self._accepted_samples,
+                                operation,
+                                type(exc).__name__,
+                                str(exc),
+                            )
+                        )
         self._closed = True
-        self._logger.info("stream_closed", pending_samples=self.retained_samples)
+        with suppress(Exception):
+            self._logger.info("stream_closed", pending_samples=self.retained_samples)
         if errors:
             raise StreamCloseError("resource closure failed", outputs, tuple(errors))
         return outputs
@@ -347,19 +365,47 @@ class WakeStreamProcessor:
         self._generation = generation
         self._segment_active = True
         self._diagnostic_vad_speech = False
+        self._final_vad_ranges = None
+        self._vad_finalization_attempted = False
+        self._final_vad_consumed = 0
+        self._wake_finalized = False
+        self._segment_output_assembled = False
+        self._activation_finalized = False
 
     def _finish_segment(self, wake_reason: WakeCandidateEndReason) -> list[OutputChunk]:
         end = self._timeline.next_position
-        ranges = self._vad_policy.finish(end)
-        self._consume_vad(ranges, reason=VadTransitionReason.SEGMENT_END)
-        if self._wake_policy.evaluating:
-            self._logger.info("wake_candidate_rejected", position=end)
-        self._wake_policy.finish(end, reason=wake_reason)
-        outputs = self._emit_through(end)
+        if self._final_vad_ranges is None:
+            self._vad_finalization_attempted = True
+            self._final_vad_ranges = self._vad_policy.finish(end)
+        while self._final_vad_consumed < len(self._final_vad_ranges):
+            vad_range = self._final_vad_ranges[self._final_vad_consumed]
+            self._final_vad_consumed += 1
+            self._consume_vad(
+                [vad_range],
+                reason=VadTransitionReason.SEGMENT_END,
+            )
+        if not self._wake_finalized:
+            if self._wake_policy.evaluating:
+                self._logger.info("wake_candidate_rejected", position=end)
+            try:
+                self._wake_policy.finish(end, reason=wake_reason)
+            finally:
+                self._wake_finalized = True
         if self._diagnostics is not None and self._diagnostic_vad_speech:
             assert self._generation is not None
             self._diagnostics.append(VadSpeechDiagnostic(self._generation, end, False, VadTransitionReason.SEGMENT_END))
-        self._activation.finish_segment(end)
+        outputs: list[OutputChunk] = []
+        if not self._segment_output_assembled:
+            outputs = self._emit_through(end, evaluating=False)
+            self._segment_output_assembled = True
+        if not self._activation_finalized:
+            try:
+                self._activation.finish_segment(end)
+            except Exception:
+                self._failure_outputs.extend(outputs)
+                raise
+            finally:
+                self._activation_finalized = True
         self._segment_active = False
         self._generation = None
         return outputs
@@ -387,8 +433,8 @@ class WakeStreamProcessor:
         reason: VadTransitionReason = VadTransitionReason.EVIDENCE,
     ) -> None:
         self._record_vad_ranges(ranges, reason)
+        self._pending_vad.extend(ranges)
         for vad_range in ranges:
-            self._pending_vad.append(vad_range)
             update = self._wake_policy.consume(self._timeline, [vad_range])
             if update.decision is not None:
                 self._pending_decision = update.decision
@@ -437,12 +483,12 @@ class WakeStreamProcessor:
                 ranges, decision, evaluating=self._wake_policy.evaluating if evaluating is None else evaluating
             )
             outputs = [self._output(item) for item in activated]
+            self._timeline.release_before(ranges[-1].sample_range.end)
         except Exception:
             self._pending_vad = pending_before
             self._pending_decision = decision_before
             self._activation = activation_before
             raise
-        self._timeline.release_before(ranges[-1].sample_range.end)
         return outputs
 
     def _output(self, item: ActivationRange) -> OutputChunk:
@@ -457,11 +503,6 @@ class WakeStreamProcessor:
             item.is_speech,
             item.is_activated,
         )
-
-    def _activation_position(self) -> int:
-        if self._pending_vad:
-            return self._pending_vad[0].sample_range.start
-        return self._timeline.next_position
 
     def _record_vad_ranges(self, ranges: list[VadRange], reason: VadTransitionReason) -> None:
         if self._diagnostics is None:
@@ -501,6 +542,39 @@ class WakeStreamProcessor:
     def _require_open(self) -> None:
         if self._closed or self._finished or self._failed:
             raise StreamStateError("processor is closed or finished")
+
+    def _enter_failure(
+        self,
+        error: BaseException,
+        outputs: list[OutputChunk],
+        operation: DiagnosticFailureOperation,
+        *,
+        tail: InputChunk | None = None,
+    ) -> None:
+        self._failed = True
+        self._failure_outputs.extend(outputs)
+        if tail is not None:
+            self._failure_tail = tail
+        self._failure_tail_is_speech = self._vad_policy.failure_is_speech if self._segment_active else False
+        with suppress(Exception):
+            self._logger.error(
+                "stream_processing_failed",
+                generation=self._generation,
+                position=self._timeline.next_position,
+                pending_samples=self._timeline.retained_samples,
+                error=str(error),
+            )
+            if self._diagnostics is not None:
+                self._diagnostics.append(
+                    FailureDiagnostic(
+                        self._generation,
+                        self._timeline.next_position,
+                        self._accepted_samples,
+                        operation,
+                        type(error).__name__,
+                        str(error),
+                    )
+                )
 
     def _release(self, outputs: list[OutputChunk]) -> list[OutputChunk]:
         self._emitted_samples += sum(output.samples.size for output in outputs)

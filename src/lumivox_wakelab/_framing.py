@@ -146,6 +146,8 @@ class WakeWordFramer(_Framer):
         if self._position + self._frame_samples > end:
             return None
         result = self._infer(timeline, self._position)
+        if not 0 <= result.value <= 1:
+            raise ValueError("wake-word backend infer must return a probability between 0 and 1")
         self._position = result.sample_range.end
         return result
 

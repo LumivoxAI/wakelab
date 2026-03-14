@@ -25,7 +25,6 @@ class VadPolicy:
         if not isinstance(config, VadPolicyConfig):
             raise TypeError("config must be a VadPolicyConfig")
         self._config = config
-        self._segment_start: int | None = None
         self._position: int | None = None
         self._frontier: int | None = None
         self._state = "quiet"
@@ -55,7 +54,6 @@ class VadPolicy:
             raise ValueError("segment start must be nonnegative")
         if self._position is not None:
             raise RuntimeError("VAD segment is already active")
-        self._segment_start = start
         self._position = start
         self._frontier = start
         self._state = "quiet"
@@ -78,14 +76,15 @@ class VadPolicy:
             if self._state == "quiet":
                 if self._evidence_is_speech:
                     self._start_candidate(sample_range.start, "onset")
+                    if self._candidate_samples >= self._config.minimum_speech_samples:
+                        self._confirm_onset(sample_range.end, emitted)
                 else:
                     self._emit_quiet_through(sample_range.end, emitted)
             elif self._state == "onset":
                 if self._evidence_is_speech:
                     self._candidate_samples += sample_range.end - sample_range.start
                     if self._candidate_samples >= self._config.minimum_speech_samples:
-                        self._state = "speech"
-                        self._emit_through(sample_range.end, True, emitted)
+                        self._confirm_onset(sample_range.end, emitted)
                 else:
                     self._reject_candidate()
                     self._emit_quiet_through(sample_range.end, emitted)
@@ -94,6 +93,8 @@ class VadPolicy:
                     self._emit_through(sample_range.end, True, emitted)
                 else:
                     self._start_candidate(sample_range.start, "silence")
+                    if self._candidate_samples >= self._config.minimum_silence_samples:
+                        self._confirm_silence(sample_range.end, emitted)
             else:  # self._state == "silence"
                 if self._evidence_is_speech:
                     self._state = "speech"
@@ -103,13 +104,7 @@ class VadPolicy:
                 else:
                     self._candidate_samples += sample_range.end - sample_range.start
                     if self._candidate_samples >= self._config.minimum_silence_samples:
-                        assert self._candidate_start is not None
-                        protected_until = self._candidate_start + self._config.right_padding_samples
-                        self._protected_speech_until = max(self._protected_speech_until or 0, protected_until)
-                        self._state = "quiet"
-                        self._candidate_start = None
-                        self._candidate_samples = 0
-                        self._emit_quiet_through(sample_range.end, emitted)
+                        self._confirm_silence(sample_range.end, emitted)
         return emitted
 
     def finish(self, end: int, /) -> list[VadRange]:
@@ -125,7 +120,6 @@ class VadPolicy:
         emitted: list[VadRange] = []
         self._emit_through(end, self._state in {"speech", "silence"}, emitted)
         self._position = None
-        self._segment_start = None
         self._candidate_start = None
         self._candidate_samples = 0
         return emitted
@@ -161,6 +155,19 @@ class VadPolicy:
         self._state = "quiet"
         self._candidate_start = None
         self._candidate_samples = 0
+
+    def _confirm_onset(self, end: int, emitted: list[VadRange]) -> None:
+        self._state = "speech"
+        self._emit_through(end, True, emitted)
+
+    def _confirm_silence(self, end: int, emitted: list[VadRange]) -> None:
+        assert self._candidate_start is not None
+        protected_until = self._candidate_start + self._config.right_padding_samples
+        self._protected_speech_until = max(self._protected_speech_until or 0, protected_until)
+        self._state = "quiet"
+        self._candidate_start = None
+        self._candidate_samples = 0
+        self._emit_quiet_through(end, emitted)
 
     def _emit_quiet_through(self, end: int, emitted: list[VadRange]) -> None:
         self._emit_through(max(self._frontier or 0, end - self._config.left_padding_samples), False, emitted)

@@ -14,6 +14,7 @@ from lumivox_wakelab._artifacts import (
     ensure_artifact,
 )
 
+from ._backend import WakeWordBackend
 from ._openwakeword import (
     EMBEDDING_MANIFEST,
     MELSPECTROGRAM_MANIFEST,
@@ -59,5 +60,6 @@ __all__ = [
     "WakeWordError",
     "WakeWordInferenceError",
     "WakeWordInitializationError",
+    "WakeWordBackend",
     "ensure_openwakeword_feature_models",
 ]
