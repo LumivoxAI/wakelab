@@ -16,6 +16,7 @@ from lumivox_core.logger import Logger
 from lumivox_wakelab import StreamConfig, VadPolicyConfig, WakePolicyConfig, WakeStreamProcessor
 from lumivox_wakelab.vad import SileroVad, ensure_silero_vad_model
 from lumivox_wakelab.wakeword import OpenWakeWord, ensure_openwakeword_feature_models
+from lumivox_wakelab._retention import required_retained_audio_samples
 
 _ROOT_FIELDS = {
     "schema_version",
@@ -137,10 +138,11 @@ def parse_profile(value: object) -> ProfileDraft:
     wake = cast(WakePolicyConfig, _policy(wake_mapping, WakePolicyConfig))
     maximum = cast(int, _required(root, "max_retained_audio_samples", int))
     StreamConfig(vad, wake, maximum)
-    required = max(
-        _SILERO_FRAME_SAMPLES + vad.minimum_speech_samples,
-        _SILERO_FRAME_SAMPLES + vad.minimum_silence_samples + vad.right_padding_samples,
-        _SILERO_FRAME_SAMPLES + _OPENWAKEWORD_FRAME_SAMPLES + wake.pre_roll_samples,
+    config = StreamConfig(vad, wake, maximum)
+    required = required_retained_audio_samples(
+        config,
+        _SILERO_FRAME_SAMPLES,
+        _OPENWAKEWORD_FRAME_SAMPLES,
     )
     if maximum < required:
         raise ValueError(f"max_retained_audio_samples must be at least {required} for the real backends")
@@ -222,20 +224,20 @@ def save_profile(path: Path, draft: ProfileDraft, *, replace: bool = False) -> M
     return resolve_profile(validated, destination)
 
 
-def verify_classifier(profile: MicrophoneProfile) -> None:
-    digest = hashlib.sha256()
+def verify_classifier(profile: MicrophoneProfile) -> bytes:
+    """Return the exact classifier snapshot whose digest was verified."""
+
     try:
-        with profile.classifier_path.open("rb") as classifier:
-            while block := classifier.read(1024 * 1024):
-                digest.update(block)
+        classifier_bytes = profile.classifier_path.read_bytes()
     except OSError as error:
         raise ValueError(f"cannot read classifier {profile.classifier_path}: {error}") from error
-    actual = digest.hexdigest()
+    actual = hashlib.sha256(classifier_bytes).hexdigest()
     if actual != profile.classifier_sha256:
         raise ValueError(
             f"classifier SHA-256 mismatch for {profile.classifier_path}: "
             f"expected {profile.classifier_sha256}, got {actual}"
         )
+    return classifier_bytes
 
 
 def build_processor(
@@ -244,14 +246,19 @@ def build_processor(
     *,
     diagnostic_event_capacity: int = 0,
 ) -> BuiltProcessor:
-    verify_classifier(profile)
+    classifier_bytes = verify_classifier(profile)
     vad_path = ensure_silero_vad_model(profile.model_root, logger=logger, allow_download=profile.allow_download)
     feature_dir = ensure_openwakeword_feature_models(
         profile.model_root, logger=logger, allow_download=profile.allow_download
     )
     vad = SileroVad.load(vad_path, logger=logger)
     try:
-        wake = OpenWakeWord.load(feature_dir, profile.classifier_path, logger=logger)
+        wake = OpenWakeWord.load(
+            feature_dir,
+            profile.classifier_path,
+            logger=logger,
+            classifier_bytes=classifier_bytes,
+        )
     except Exception:
         vad.close()
         raise

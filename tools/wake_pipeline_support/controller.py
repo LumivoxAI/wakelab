@@ -29,6 +29,7 @@ from lumivox_wakelab import (
     OutputChunk,
     DiagnosticEvent,
     RearmDiagnostic,
+    StreamCloseError,
     FailureDiagnostic,
     VadFrameDiagnostic,
     VadSpeechDiagnostic,
@@ -48,6 +49,7 @@ DEFAULT_DISPLAY_BUCKET_SAMPLES = SAMPLE_RATE // 5
 DEFAULT_EVENT_CAPACITY = 10_000
 LATENCY_AVERAGE_WINDOW_NS = 500_000_000
 DEFAULT_RECORDING_PATH = Path(__file__).parents[2] / "wake-pipeline-capture.wav"
+_WORKER_JOIN_TIMEOUT_SECONDS = 10
 
 
 class SessionState(StrEnum):
@@ -392,7 +394,9 @@ class SessionController:
 
     def start(self, owner_id: str, device_id: str, profile: MicrophoneProfile) -> None:
         with self._lock:
-            if self._state in {SessionState.LOADING, SessionState.LISTENING, SessionState.STOPPING}:
+            if self._state in {SessionState.LOADING, SessionState.LISTENING, SessionState.STOPPING} or (
+                self._worker is not None and self._worker.is_alive()
+            ):
                 raise RuntimeError("a diagnostic session is already active")
             self._recorder.begin_session(profile.stream_config.max_retained_audio_samples)
             self._state = SessionState.LOADING
@@ -445,7 +449,10 @@ class SessionController:
             if self._cancelled.is_set():
                 handoff.put_command("stop")
                 pipeline.stop(immediate=True)
-                worker.join(timeout=10)
+                worker.join(timeout=_WORKER_JOIN_TIMEOUT_SECONDS)
+                if worker.is_alive():
+                    with self._lock:
+                        self._state = SessionState.STOPPING
                 return
             pipeline.start()
             with self._lock:
@@ -549,9 +556,13 @@ class SessionController:
             except Exception as error:
                 self._fail(error)
         if worker is not None and worker is not current_thread() and worker.is_alive():
-            worker.join(timeout=10)
+            worker.join(timeout=_WORKER_JOIN_TIMEOUT_SECONDS)
         with self._lock:
-            if self._state is not SessionState.ERROR:
+            if worker is not None and worker.is_alive():
+                if self._state is not SessionState.ERROR:
+                    self._state = SessionState.STOPPING
+                self._error = self._error or "diagnostic worker did not stop before the timeout"
+            elif self._state is not SessionState.ERROR:
                 self._state = SessionState.STOPPED
 
     def shutdown(self) -> None:
@@ -654,6 +665,9 @@ class SessionController:
         finally:
             try:
                 self._record_outputs(processor.close())
+            except StreamCloseError as error:
+                self._record_outputs(error.outputs)
+                self._fail(error)
             except Exception as error:
                 self._fail(error)
             self._collect(processor)
@@ -662,6 +676,11 @@ class SessionController:
             except Exception as error:
                 self._fail(error)
             handoff.close()
+            with self._lock:
+                if self._worker is current_thread():
+                    self._worker = None
+                    if self._state is SessionState.STOPPING:
+                        self._state = SessionState.STOPPED
 
     def _sync_recording(self) -> None:
         with self._lock:

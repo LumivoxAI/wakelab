@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import wave
 import argparse
+import tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from threading import Event
@@ -133,16 +135,21 @@ def write_wave(path: Path, samples: NDArray[np.int16]) -> None:
         raise ValueError("output path must end with .wav")
     if not path.parent.is_dir():
         raise ValueError(f"output directory does not exist: {path.parent}")
+    temporary_path: Path | None = None
     try:
-        with path.open("xb") as output:
+        with tempfile.NamedTemporaryFile("w+b", dir=path.parent, prefix=f".{path.name}.", delete=False) as output:
+            temporary_path = Path(output.name)
             with wave.open(output, "wb") as wav:
                 wav.setnchannels(1)
                 wav.setsampwidth(2)
                 wav.setframerate(SAMPLE_RATE)
                 wav.writeframes(samples.astype(np.dtype("<i2"), copy=False).tobytes())
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _duration(value: str) -> Decimal:
