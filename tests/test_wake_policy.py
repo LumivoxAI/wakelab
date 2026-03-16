@@ -77,14 +77,34 @@ def test_bridge_limit_is_inclusive_and_gap_audio_is_contiguous(
     assert policy.evaluating
 
 
-def test_gap_longer_than_limit_rejects_without_inferring_crossing_frame() -> None:
-    policy, timeline, backend = make_policy([0.0], silence_bridge_samples=4)
+def test_gap_longer_than_limit_infers_complete_frames_before_rejecting() -> None:
+    policy, timeline, backend = make_policy([0.0, 0.0], silence_bridge_samples=4)
 
     update = policy.consume(timeline, ranges((0, 4, True), (4, 9, False), (9, 12, True)))
 
-    assert backend.frames == [[0, 1, 2, 3]]
+    assert backend.frames == [[0, 1, 2, 3], [4, 5, 6, 7]]
     assert update.safe_frontier == 9
     assert policy.evaluating
+
+
+def test_confirming_score_inside_long_gap_activates_before_bridge_rejection() -> None:
+    policy, timeline, backend = make_policy([0.9, 0.9], silence_bridge_samples=4)
+
+    update = policy.consume(timeline, ranges((0, 4, True), (4, 12, False)))
+
+    assert update.decision == WakeDecision(0, SampleRange(0, 4), SampleRange(4, 8), 0.9, 0.9)
+    assert backend.frames == [[0, 1, 2, 3], [4, 5, 6, 7]]
+
+
+def test_bridge_detection_is_independent_of_non_speech_partition() -> None:
+    decisions: list[WakeDecision | None] = []
+    for non_speech in (((4, 12, False),), ((4, 6, False), (6, 12, False))):
+        policy, timeline, _ = make_policy([0.9, 0.9], silence_bridge_samples=4)
+        update = policy.consume(timeline, ranges((0, 4, True), *non_speech))
+        decisions.append(update.decision)
+
+    assert decisions[0] == decisions[1]
+    assert decisions[0] is not None
 
 
 def test_score_confirmation_anchors_pre_roll_to_first_qualifying_frame() -> None:

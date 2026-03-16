@@ -11,12 +11,13 @@ from lumivox_wakelab._timeline import SampleRange, AudioTimeline
 
 
 class FakeBackend:
-    def __init__(self, frame_samples: int, *, failure_calls: Iterable[int] = ()) -> None:
+    def __init__(self, frame_samples: int, *, failure_calls: Iterable[int] = (), result_scale: float = 1.0) -> None:
         self.sample_rate = 16_000
         self.frame_samples = frame_samples
         self.frames: list[np.ndarray[tuple[int], np.dtype[np.int16]]] = []
         self.reset_calls = 0
         self._failure_calls = set(failure_calls)
+        self._result_scale = result_scale
 
     def infer(self, frame: np.ndarray[tuple[int], np.dtype[np.int16]]) -> float:
         call = len(self.frames)
@@ -24,7 +25,7 @@ class FakeBackend:
             self._failure_calls.remove(call)
             raise RuntimeError("injected inference failure")
         self.frames.append(frame.copy())
-        return float(frame[0])
+        return float(frame[0]) * self._result_scale
 
     def reset(self) -> None:
         self.reset_calls += 1
@@ -105,13 +106,13 @@ def test_failed_vad_frame_does_not_advance_cursor() -> None:
 def test_wake_framing_starts_at_arbitrary_candidate_position_and_ends_tail() -> None:
     timeline = AudioTimeline(16)
     append(timeline, list(range(12)))
-    backend = FakeBackend(4)
+    backend = FakeBackend(4, result_scale=0.125)
     framer = WakeWordFramer(backend)
     framer.start_candidate(3)
 
     assert framer.consume(timeline, 12) == [
-        FrameResult(SampleRange(3, 7), 3.0),
-        FrameResult(SampleRange(7, 11), 7.0),
+        FrameResult(SampleRange(3, 7), 0.375),
+        FrameResult(SampleRange(7, 11), 0.875),
     ]
     framer.end_candidate(12)
 
@@ -149,6 +150,19 @@ def test_wake_candidate_rejects_overlap_and_reset_cancels_it() -> None:
     assert not framer.evaluating
     framer.start_candidate(4)
     assert backend.reset_calls == 3
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan"), float("inf")])
+def test_wake_framer_rejects_invalid_backend_probabilities(value: float) -> None:
+    timeline = AudioTimeline(4)
+    append(timeline, [1, 2, 3, 4])
+    backend = FakeBackend(4, result_scale=value)
+    framer = WakeWordFramer(backend)
+    framer.start_candidate(0)
+
+    with pytest.raises(ValueError, match="finite scalar|probability"):
+        framer.consume_next(timeline, 4)
+    assert framer.position == 0
 
 
 @pytest.mark.parametrize("sample_rate,frame_samples", [(8_000, 4), (16_000, 0), (16_000, True)])

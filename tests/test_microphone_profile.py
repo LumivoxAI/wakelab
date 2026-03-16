@@ -86,7 +86,7 @@ def test_profile_no_replace_is_atomic(tmp_path: Path) -> None:
     assert destination.read_text(encoding="utf-8") == "existing"
 
 
-def test_classifier_digest_is_verified_incrementally(tmp_path: Path) -> None:
+def test_classifier_digest_returns_the_verified_byte_snapshot(tmp_path: Path) -> None:
     classifier = tmp_path / "classifier.onnx"
     classifier.write_bytes(b"classifier")
     value = profile_value()
@@ -94,7 +94,7 @@ def test_classifier_digest_is_verified_incrementally(tmp_path: Path) -> None:
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(json.dumps(value), encoding="utf-8")
 
-    verify_classifier(load_profile(profile_path))
+    assert verify_classifier(load_profile(profile_path)) == b"classifier"
     classifier.write_bytes(b"changed")
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         verify_classifier(load_profile(profile_path))

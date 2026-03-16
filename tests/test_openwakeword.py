@@ -383,9 +383,12 @@ def test_load_constructs_three_byte_sessions_warms_pipeline_and_restores_state(
     assert options.inter_op_num_threads == 1
     assert options.intra_op_num_threads == 1
     assert options.graph_optimization_level == "all"
-    assert len(mel.feeds) == len(embedding.feeds) == len(classifier.feeds) == 1
+    assert len(mel.feeds) == len(embedding.feeds) == 2
+    assert len(classifier.feeds) == 1
     assert mel.feeds[0]["input"].shape == (1, 164_960)
+    assert mel.feeds[1]["input"].shape == (1, 1_760)
     assert embedding.feeds[0]["input_1"].shape == (120, 76, 32, 1)
+    assert embedding.feeds[1]["input_1"].shape == (1, 76, 32, 1)
     assert classifier.feeds[0]["custom_features"].shape == (1, 28, 96)
 
     assert backend.sample_rate == 16_000
@@ -394,7 +397,22 @@ def test_load_constructs_three_byte_sessions_warms_pipeline_and_restores_state(
     assert backend.classifier_history_frames == 28
     assert backend.active_providers == ("CPUExecutionProvider",)
     backend.infer(np.zeros(1_280, dtype=np.dtype("<i2")))
-    np.testing.assert_array_equal(mel.feeds[1]["input"][0, :480], np.zeros(480, dtype=np.float32))
+    np.testing.assert_array_equal(mel.feeds[2]["input"][0, :480], np.zeros(480, dtype=np.float32))
+    backend.close()
+
+
+def test_load_can_use_an_already_verified_classifier_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    classifier_path, _, _, _, runtime = configure_fake_load(tmp_path, monkeypatch)
+    classifier_path.write_bytes(b"replaced")
+
+    backend = OpenWakeWord.load(
+        "features",
+        classifier_path,
+        logger=RecordingLogger(),
+        classifier_bytes=b"classifier",
+    )
+
+    assert runtime.captured[-1][0] == b"classifier"
     backend.close()
 
 

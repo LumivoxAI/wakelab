@@ -4,12 +4,14 @@ import time
 import wave
 from typing import cast
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 import pytest
 from lumivox_devicelab import CapturedChunk, CaptureHandler
 
-from lumivox_wakelab import OutputChunk, WakeFrameDiagnostic, WakeStreamProcessor
+import tools.wake_pipeline_support.controller as controller_module
+from lumivox_wakelab import OutputChunk, StreamCloseError, WakeFrameDiagnostic, WakeStreamProcessor
 from tools.wake_pipeline_support.charts import downsample_extrema
 from tools.wake_pipeline_support.profile import BuiltProcessor, parse_profile, resolve_profile
 from tools.wake_pipeline_support.controller import (
@@ -281,6 +283,90 @@ def test_controller_closes_processor_when_pipeline_construction_fails(tmp_path: 
 
     assert controller.snapshot().state is SessionState.ERROR
     assert (vad.close_calls, wake.close_calls) == (1, 1)
+
+
+class CloseOutputProcessor(WakeStreamProcessor):
+    def close(self) -> list[OutputChunk]:
+        super().close()
+        output = OutputChunk(np.asarray([99], dtype=np.dtype("<i2")), 0, 0, 0, False, True, True)
+        raise StreamCloseError("injected close failure", [output], (RuntimeError("resource failure"),))
+
+
+def test_controller_records_outputs_carried_by_close_error(tmp_path: Path) -> None:
+    def builder(profile: object, logger: object, capacity: int) -> BuiltProcessor:
+        processor = CloseOutputProcessor(
+            config(),
+            FakeBackend([0.1, 0.1]),
+            FakeBackend([]),
+            logger=cast(RecordingLogger, logger),
+        )
+        return BuiltProcessor(processor, ())
+
+    controller = SessionController(
+        RecordingLogger(),
+        recording_path=tmp_path / "capture.wav",
+        processor_builder=builder,
+        pipeline_factory=lambda handler, device_id, logger: FakePipeline(handler),
+    )
+    profile = resolve_profile(parse_profile(profile_value()), tmp_path / "profile.json")
+    controller.start("client", "microphone", profile)
+    controller.shutdown()
+
+    assert controller.snapshot().state is SessionState.ERROR
+    assert _wave_values(tmp_path / "capture.wav") == [99]
+
+
+class BlockingBackend(FakeBackend):
+    def __init__(self, started: Event, release: Event) -> None:
+        super().__init__([0.1, 0.1])
+        self._started = started
+        self._release = release
+
+    def infer(self, frame: np.ndarray[tuple[int], np.dtype[np.int16]]) -> float:
+        self._started.set()
+        self._release.wait(timeout=1)
+        return super().infer(frame)
+
+
+def test_controller_remains_non_restartable_until_timed_out_worker_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+
+    def builder(profile: object, logger: object, capacity: int) -> BuiltProcessor:
+        return BuiltProcessor(
+            WakeStreamProcessor(
+                config(),
+                BlockingBackend(started, release),
+                FakeBackend([]),
+                logger=cast(RecordingLogger, logger),
+            ),
+            (),
+        )
+
+    monkeypatch.setattr(controller_module, "_WORKER_JOIN_TIMEOUT_SECONDS", 0)
+    controller = SessionController(
+        RecordingLogger(),
+        recording_path=tmp_path / "capture.wav",
+        processor_builder=builder,
+        pipeline_factory=lambda handler, device_id, logger: FakePipeline(handler),
+    )
+    profile = resolve_profile(parse_profile(profile_value()), tmp_path / "profile.json")
+    controller.start("client", "microphone", profile)
+    assert started.wait(timeout=1)
+
+    controller.stop()
+    assert controller.snapshot().state is SessionState.STOPPING
+    with pytest.raises(RuntimeError, match="already active"):
+        controller.start("other", "microphone", profile)
+
+    release.set()
+    deadline = time.monotonic() + 1
+    while controller.snapshot().state is not SessionState.STOPPED and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert controller.snapshot().state is SessionState.STOPPED
 
 
 class FakeSpeaker:

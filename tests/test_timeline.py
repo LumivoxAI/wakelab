@@ -97,6 +97,15 @@ def test_timestamps_use_nearest_anchor_without_cumulative_drift() -> None:
     assert not metadata.discontinuity
 
 
+def test_zero_captured_at_is_interpolated_while_zero_running_time_is_preserved() -> None:
+    timeline = AudioTimeline(4)
+    timeline.append(chunk([0, 1, 2], captured_at_ns=0))
+
+    metadata = timeline.metadata_at(2)
+    assert metadata.running_time_ns == 0
+    assert metadata.captured_at_ns == 125_000
+
+
 def test_one_sample_running_time_discrepancy_is_accepted() -> None:
     timeline = AudioTimeline(4)
     timeline.append(chunk([0, 1], running_time_ns=10))
@@ -132,6 +141,14 @@ def test_new_segments_reset_timing_validation_and_mark_their_first_output() -> N
     assert inferred.generation == 2
     assert explicit.discontinuity
     assert explicit.running_time_ns == 999_999
+
+
+def test_initial_explicit_discontinuity_is_preserved() -> None:
+    timeline = AudioTimeline(2)
+    timeline.append(chunk([0, 1], discontinuity=True))
+
+    assert timeline.metadata_at(0).discontinuity
+    assert not timeline.metadata_at(1).discontinuity
 
 
 def test_release_preserves_the_nearest_preceding_anchor() -> None:

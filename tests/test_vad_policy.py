@@ -45,6 +45,24 @@ def policy(*, left_padding_samples: int = 0, right_padding_samples: int = 0) -> 
     return VadPolicy(config)
 
 
+@pytest.mark.parametrize("minimum", [1, 4, 5, 8, 12])
+@pytest.mark.parametrize("speech", [False, True])
+def test_transition_confirms_on_the_first_frame_reaching_sample_minimum(minimum: int, speech: bool) -> None:
+    config = VadPolicyConfig(0.6, 0.4, minimum, minimum, 0, 0)
+    vad = VadPolicy(config)
+    vad.start_segment(0)
+    values = [0.9] * ((minimum + 3) // 4)
+    if not speech:
+        vad.consume(frames(values))
+        values = [0.1] * ((minimum + 3) // 4)
+    output = vad.consume(frames(values, start=vad.finalized_position or 0))
+    end = ((minimum + 3) // 4) * 4 * (2 if not speech else 1)
+    output.extend(vad.finish(end))
+
+    expected = speech if speech else False
+    assert merged(output)[-1].is_speech is expected
+
+
 def test_hysteresis_thresholds_and_exact_speech_confirmation() -> None:
     vad = policy(left_padding_samples=2)
     vad.start_segment(0)

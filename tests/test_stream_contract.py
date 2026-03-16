@@ -7,6 +7,8 @@ import numpy as np
 import pytest
 
 import lumivox_wakelab
+import lumivox_wakelab.vad as vad_package
+import lumivox_wakelab.wakeword as wakeword_package
 from lumivox_wakelab import (
     InputChunk,
     OutputChunk,
@@ -19,6 +21,31 @@ from lumivox_wakelab import (
     WakePolicyConfig,
     StreamProcessingError,
 )
+from lumivox_wakelab.vad import VadBackend
+from lumivox_wakelab.wakeword import WakeWordBackend
+
+
+class CompatibleBackend:
+    sample_rate = 16_000
+    frame_samples = 4
+
+    def infer(self, frame: np.ndarray[tuple[int], np.dtype[np.int16]]) -> float:
+        return 0.0
+
+    def reset(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_replaceable_backend_protocols_are_public_and_structural() -> None:
+    vad_backend: VadBackend = CompatibleBackend()
+    wake_backend: WakeWordBackend = CompatibleBackend()
+
+    assert vad_backend.frame_samples == wake_backend.frame_samples == 4
+    assert "VadBackend" in vad_package.__all__
+    assert "WakeWordBackend" in wakeword_package.__all__
 
 
 def pcm(length: int = 4) -> np.ndarray[tuple[int], np.dtype[np.int16]]:

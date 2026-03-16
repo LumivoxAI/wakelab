@@ -69,7 +69,7 @@ def test_recommended_profile_is_valid_and_resolves_paths() -> None:
 
     assert profile.name == "local-demo-v1"
     assert profile.model_root == DEFAULT_PROFILE.parent.parent / "data"
-    assert profile.classifier_path == DEFAULT_PROFILE.parent.parent / "data/oww/local/local_dnn_ex1000_64.onnx"
+    assert profile.classifier_path == DEFAULT_PROFILE.parent.parent / "data/oww/local/dnn_ex1000_64.onnx"
     assert profile.stream_config.wake_policy.pre_roll_samples == 24_000
 
 
@@ -138,5 +138,7 @@ def test_write_wave_writes_pcm_and_refuses_overwrite(tmp_path: Path) -> None:
     with wave.open(str(path), "rb") as wav:
         assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getnframes()) == (1, 2, SAMPLE_RATE, 3)
         assert wav.readframes(3) == samples.tobytes()
+    existing = path.read_bytes()
     with pytest.raises(FileExistsError):
         write_wave(path, samples)
+    assert path.read_bytes() == existing
