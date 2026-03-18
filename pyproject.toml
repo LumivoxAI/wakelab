@@ -54,7 +54,7 @@ dev = [
 testpaths = ["tests"]
 addopts = "-m 'not model'"
 markers = [
-    "model: tests requiring the pinned external ONNX model",
+    "model: tests requiring pinned external ONNX model artifacts",
 ]
 
 [tool.ruff]

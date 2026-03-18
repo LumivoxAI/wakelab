@@ -6,7 +6,9 @@ import pytest
 from lumivox_wakelab.stream import InputChunk, WakePolicyConfig
 from lumivox_wakelab._framing import WakeWordFramer
 from lumivox_wakelab._timeline import SampleRange, AudioTimeline
+from lumivox_wakelab.diagnostics import WakeCandidateEndReason, WakeCandidateEndedDiagnostic
 from lumivox_wakelab.vad._policy import VadRange
+from lumivox_wakelab._diagnostics import DiagnosticCollector
 from lumivox_wakelab.wakeword._policy import WakePolicy, WakeDecision
 
 
@@ -30,7 +32,12 @@ class FakeBackend:
         pass
 
 
-def make_policy(scores: list[float], **overrides: int | float) -> tuple[WakePolicy, AudioTimeline, FakeBackend]:
+def make_policy(
+    scores: list[float],
+    *,
+    diagnostics: DiagnosticCollector | None = None,
+    **overrides: int | float,
+) -> tuple[WakePolicy, AudioTimeline, FakeBackend]:
     config = WakePolicyConfig(
         score_threshold=float(overrides.get("score_threshold", 0.5)),
         consecutive_score_count=int(overrides.get("consecutive_score_count", 2)),
@@ -38,7 +45,7 @@ def make_policy(scores: list[float], **overrides: int | float) -> tuple[WakePoli
         pre_roll_samples=int(overrides.get("pre_roll_samples", 3)),
     )
     backend = FakeBackend(scores)
-    policy = WakePolicy(config, WakeWordFramer(backend))
+    policy = WakePolicy(config, WakeWordFramer(backend), diagnostics=diagnostics)
     timeline = AudioTimeline(64)
     timeline.append(InputChunk(np.arange(32, dtype=np.dtype("<i2")), 0, 0, 0, False))
     policy.start_segment(0)
@@ -85,6 +92,16 @@ def test_gap_longer_than_limit_infers_complete_frames_before_rejecting() -> None
     assert backend.frames == [[0, 1, 2, 3], [4, 5, 6, 7]]
     assert update.safe_frontier == 9
     assert policy.evaluating
+
+
+def test_long_gap_diagnostic_ends_at_silence_bridge_boundary() -> None:
+    diagnostics = DiagnosticCollector(8)
+    policy, timeline, _ = make_policy([0.0, 0.0], silence_bridge_samples=4, diagnostics=diagnostics)
+
+    policy.consume(timeline, ranges((0, 4, True), (4, 12, False)))
+
+    expected = WakeCandidateEndedDiagnostic(0, 0, 8, WakeCandidateEndReason.SILENCE_BRIDGE_EXCEEDED)
+    assert expected in diagnostics.drain().events
 
 
 def test_confirming_score_inside_long_gap_activates_before_bridge_rejection() -> None:

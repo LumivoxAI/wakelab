@@ -299,7 +299,7 @@ class WakeStreamProcessor:
                 tail.generation,
                 tail.discontinuity,
                 self._failure_tail_is_speech,
-                self._activation.state.value == "activated",
+                self._activation.wake_inference_bypassed,
             )
             self._failure_outputs.append(output)
             self._failure_tail = None

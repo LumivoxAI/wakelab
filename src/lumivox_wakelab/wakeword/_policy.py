@@ -197,9 +197,10 @@ class WakePolicy:
         found = self._consume_through(timeline, min(sample_range.end, bridge_end))
         if found is not None:
             return found
-        self._position = sample_range.end
         if sample_range.end > bridge_end:
+            self._position = bridge_end
             self._end_candidate(WakeCandidateEndReason.SILENCE_BRIDGE_EXCEEDED)
+        self._position = sample_range.end
         return None
 
     def _consume_through(self, timeline: AudioTimeline, end: int) -> WakeDecision | None:

@@ -101,7 +101,7 @@ def test_diagnostic_history_records_only_nonzero_wake_streaks() -> None:
 def test_activation_recording_uses_finalized_output_and_is_readable_before_rearm(tmp_path: Path) -> None:
     path = tmp_path / "capture.wav"
     recorder = ActivatedWaveRecorder(path)
-    recorder.begin_session(8)
+    recorder.begin_session()
     recorder.accept_output(_output([0, 1], activated=False))
     recorder.accept_output(_output([2, 3, 4, 5, 6, 7], activated=True))
 

@@ -147,7 +147,7 @@ class StreamConfig:
 
 
 class StreamProcessor(Protocol):
-    """Synchronous lifecycle contract implemented by the future orchestrator."""
+    """Synchronous lifecycle contract implemented by streaming processors."""
 
     def process(self, chunk: InputChunk, /) -> list[OutputChunk]: ...
 
