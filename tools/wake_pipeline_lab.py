@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from collections.abc import Sequence
 
-DEFAULT_PROFILE = Path(__file__).parents[1] / "examples" / "profile.json"
+DEFAULT_PROFILE = Path(__file__).with_name("profile.json")
 
 
 def create_parser() -> argparse.ArgumentParser:

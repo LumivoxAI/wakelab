@@ -137,7 +137,6 @@ def parse_profile(value: object) -> ProfileDraft:
     vad = cast(VadPolicyConfig, _policy(vad_mapping, VadPolicyConfig))
     wake = cast(WakePolicyConfig, _policy(wake_mapping, WakePolicyConfig))
     maximum = cast(int, _required(root, "max_retained_audio_samples", int))
-    StreamConfig(vad, wake, maximum)
     config = StreamConfig(vad, wake, maximum)
     required = required_retained_audio_samples(
         config,

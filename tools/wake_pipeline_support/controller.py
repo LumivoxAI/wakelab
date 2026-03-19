@@ -247,9 +247,7 @@ class ActivatedWaveRecorder:
     def active(self) -> bool:
         return self._writer is not None
 
-    def begin_session(self, history_samples: int) -> None:
-        if history_samples <= 0:
-            raise ValueError("recording history must be positive")
+    def begin_session(self) -> None:
         self.finish_cycle()
 
     def accept_output(self, chunk: OutputChunk) -> None:
@@ -398,7 +396,7 @@ class SessionController:
                 self._worker is not None and self._worker.is_alive()
             ):
                 raise RuntimeError("a diagnostic session is already active")
-            self._recorder.begin_session(profile.stream_config.max_retained_audio_samples)
+            self._recorder.begin_session()
             self._state = SessionState.LOADING
             self._owner_id = owner_id
             self._profile_name = profile.name
